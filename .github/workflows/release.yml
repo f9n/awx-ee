@@ -107,9 +107,9 @@ jobs:
 
             ## 🚀 Platform Support
 
-            - **Platforms**: linux/amd64, linux/arm64
+            - **Platforms**: linux/amd64
             - **Python**: 3.13  
-            - **Base**: CentOS Stream 9
+            - **Base**: Fedora 42
 
             ## 📥 Installation
 
