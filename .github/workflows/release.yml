@@ -7,32 +7,133 @@ on:
 
 jobs:
   release:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     name: Release
     steps:
-      - uses: actions/checkout@v2
+      - name: Check out code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v2
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: "3.13"
+          cache: 'pip'
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install tox
 
-      - name: Build image
+      - name: Build image with tox
         env:
           DOCKER_BUILDKIT: 1
         run: |
-          tox -e docker -- --tag=quay.io/ansible/awx-ee:${{ github.event.release.tag_name }}
+          tox -e docker -- --tag=ghcr.io/${{ github.repository }}:${{ github.event.release.tag_name }}
 
       - name: Apply latest tag
         run: |
-         docker tag quay.io/ansible/awx-ee:${{ github.event.release.tag_name }} quay.io/ansible/awx-ee:latest
+          docker tag ghcr.io/${{ github.repository }}:${{ github.event.release.tag_name }} ghcr.io/${{ github.repository }}:latest
 
       - name: Push images
         run: |
-         echo "${{ secrets.QUAY_TOKEN }}" | docker login quay.io -u ${{ secrets.QUAY_USERNAME }} --password-stdin
-         docker push quay.io/ansible/awx-ee:${{ github.event.release.tag_name }}
-         docker push quay.io/ansible/awx-ee:latest
+          docker push ghcr.io/${{ github.repository }}:${{ github.event.release.tag_name }}
+          docker push ghcr.io/${{ github.repository }}:latest
+
+      - name: Update Release Notes
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const release = await github.rest.repos.getRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: context.payload.release.id
+            });
+
+            // Generate release notes using GitHub API
+            const releaseNotes = await github.rest.repos.generateReleaseNotes({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: '${{ github.event.release.tag_name }}',
+              previous_tag_name: undefined // Let GitHub auto-detect
+            });
+
+            // Get commits between releases for detailed changelog
+            const commits = await github.rest.repos.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              since: releaseNotes.data.previous_tag_name ? 
+                (await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${releaseNotes.data.previous_tag_name}`
+                })).data.object.sha : undefined,
+              until: '${{ github.sha }}'
+            });
+
+            // Format commits for changelog
+            let commitChangelog = '';
+            if (commits.data.length > 0) {
+              commitChangelog = `\n## 📝 Detailed Commit Changelog\n\n`;
+              commits.data.reverse().forEach(commit => {
+                const shortSha = commit.sha.substring(0, 7);
+                const message = commit.commit.message.split('\n')[0]; // First line only
+                const author = commit.author ? commit.author.login : commit.commit.author.name;
+                commitChangelog += `- [\`${shortSha}\`](${commit.html_url}) ${message} (@${author})\n`;
+              });
+            }
+
+            // Add container image info and commit changelog to generated notes
+            const enhancedBody = releaseNotes.data.body + commitChangelog + `
+
+            ## 📦 Container Images
+
+            This release includes the following container images:
+
+            - **Latest**: \`ghcr.io/${{ github.repository }}:latest\`  
+            - **Version**: \`ghcr.io/${{ github.repository }}:${{ github.event.release.tag_name }}\`
+
+            ## 🚀 Platform Support
+
+            - **Platforms**: linux/amd64, linux/arm64
+            - **Python**: 3.13  
+            - **Base**: CentOS Stream 9
+
+            ## 📥 Installation
+
+            Pull the image:
+            \`\`\`bash
+            docker pull ghcr.io/${{ github.repository }}:${{ github.event.release.tag_name }}
+            # or
+            docker pull ghcr.io/${{ github.repository }}:latest
+            \`\`\`
+
+            ## 🔧 Usage with AWX
+
+            This execution environment can be used directly in AWX/Ansible Controller:
+            \`\`\`yaml
+            execution_environments:
+              - name: AWX EE
+                image: ghcr.io/${{ github.repository }}:${{ github.event.release.tag_name }}
+            \`\`\`
+            `;
+
+            // Update the release with enhanced notes
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: context.payload.release.id,
+              body: enhancedBody
+            });
